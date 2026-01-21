@@ -10,15 +10,6 @@ using CairoMakie
 using AtmosphericProfilesLibrary
 using Statistics
 
-# until https://github.com/CliMA/Oceananigans.jl/pull/5100 is merged
-using Adapt: Adapt, adapt
-
-function Adapt.adapt_structure(to, bckf::Oceananigans.Models.BoundaryConditionKernelFunction{Side}) where Side
-    bc = adapt(to, bckf.bc)
-    BC = typeof(bc)
-    return Oceananigans.Models.BoundaryConditionKernelFunction{Side, BC}(bc)
-end
-
 
 # Grid setup
 grid = RectilinearGrid(GPU(), size = (512, 256, 100), halo = (5, 5, 5),
@@ -55,8 +46,8 @@ Cᵛ = 1e-3  # Vapor transfer coefficient
 Cᴰ = 1e-3  # Drag coefficient
 Uᵍ = 0.1  # Minimum wind speed (m/s)
 
-ρu_surface_flux = BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
-ρv_surface_flux = BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
+ρu_surface_flux = Breeze.BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
+ρv_surface_flux = Breeze.BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
 
 SST = 289 # mean sea surface temperature in K
 ΔT = 2.0 # front amplitude
