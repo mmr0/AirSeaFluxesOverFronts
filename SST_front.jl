@@ -309,10 +309,10 @@ fig = Figure(size=(1200, 800), fontsize=13)
 
 title = @lift "t = $(prettytime(times[$n]))"
 
-axw = Axis(fig[1, 1], ylabel="z (km)")
+axw = Axis(fig[1, 1], ylabel="z (m)")
 axu = Axis(fig[1, 3])
 axv = Axis(fig[1, 5])
-axθ = Axis(fig[2, 1], ylabel="z (km)")
+axθ = Axis(fig[2, 1], ylabel="z (m)")
 axq = Axis(fig[2, 3])
 axql = Axis(fig[2, 5])
 axτ = Axis(fig[3, 1], xlabel="x (km)", ylabel="y (km)")
