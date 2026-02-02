@@ -10,13 +10,19 @@ using CairoMakie
 using AtmosphericProfilesLibrary
 using Statistics
 
+# vertically stretched grid with 5m resolution near surface and 40m resolution above 1.5km
+z = ReferenceToStretchedDiscretization(; extent = 3000, bias = :left, bias_edge = 0,
+                                       constant_spacing = 5,  constant_spacing_extent = 60,
+                                       stretching =  PowerLawStretching(1.0085),
+                                       maximum_stretching_extent =  1500)
 
 # Grid setup
-grid = RectilinearGrid(GPU(), size = (512, 256, 100), halo = (5, 5, 5),
+grid = RectilinearGrid(GPU(), size = (1024, 512, length(z)), halo = (5, 5, 5),
                        x = (-40kilometers, 40kilometers),
                        y = (-20kilometers, 20kilometers),
-                       z = (0, 3kilometers),
+                       z = z,
                        topology = (Periodic, Periodic, Bounded))
+
 
 # Model formulation
 p₀, θ₀ = 101325, 285 # Pa, K
@@ -49,10 +55,16 @@ Uᵍ = 0.1  # Minimum wind speed (m/s)
 ρu_surface_flux = Breeze.BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
 ρv_surface_flux = Breeze.BulkDrag(; coefficient=Cᴰ, gustiness=Uᵍ)
 
-SST = 289 # mean sea surface temperature in K
-ΔT = 2.0 # front amplitude
-steepness = 10 # Controls sharpness of the transition
-T₀(x, y)  = SST + ΔT / 2 * tanh(steepness * cos(2π * x / grid.Lx))
+# SST = 289 # mean sea surface temperature in K
+# ΔT = 2.0 # front amplitude
+# steepness = 10 # Controls sharpness of the transition
+# T₀(x, y)  = SST + ΔT / 2 * tanh(steepness * cos(2π * x / grid.Lx))
+
+SST = 289.0      # mean SST [K]
+ΔT  = 2.0        # amplitude [K]
+d  = 10kilometers    # Half-width of the top-hat plateau
+S  = 1.0kilometers   # transition sharpness (smaller = steeper)
+T₀(x, y) = SST + (ΔT / 2) * ( tanh((x + d) / S) - tanh((x - d) / S))
 
 # and build the flux parameterizations
 ρθ_surface_flux = BulkSensibleHeatFlux(coefficient=Cᵀ, gustiness=Uᵍ, surface_temperature=T₀)
@@ -94,7 +106,7 @@ qᵢ(x, y, z) = qᵇ(z) + δq * ϵ() * (z < zδ)
 set!(model, θ=θᵢ, u=uᵢ, qᵗ=qᵢ)
 
 # Simulation setup
-simulation = Simulation(model, Δt=2, stop_time=8hours)
+simulation = Simulation(model, Δt=0.5, stop_time=6hours)
 conjure_time_step_wizard!(simulation, cfl=0.7)
 
 #  Diagnostic fields
@@ -163,15 +175,22 @@ filename_snap_fluxes = "SST_front_snap_fluxes.jld2"
 filename_mean_profiles = "SST_front_mean_profiles.jld2"
 
 qᵗ = model.specific_moisture
+# θ = PotentialTemperature(model)
+# qˡ = model.microphysical_fields.qˡ
+# qᵛ = model.microphysical_fields.qᵛ
+# θᵛ = θ * (1 + 0.61 * qᵛ - qˡ) # replace this with VirtualPotentialTemperature once released
+
 u, v, w, = model.velocities
-#s = sqrt(u^2 + w^2) # speed
-#ξ = ∂z(u) - ∂x(w)   # cross-stream vorticity
-U = mean(u, dims=(1, 2))  # horizontal mean
-V = mean(v, dims=(1, 2))
-W = mean(w, dims=(1, 2))
+U = Average(u, dims=(1, 2)) |> Field # horizontal mean
+V = Average(v, dims=(1, 2)) |> Field
 u′² = (u - U) * (u - U)
 v′² = (v - V) * (v - V)
-w′² = (w - W) * (w - W)
+w′² = w * w
+
+
+tke = (w′² + u′² + v′²) / 2
+
+Oceananigans.OutputWriters.default_included_properties(model::AtmosphereModel) = [:grid]
 
 # 2d surface fluxes
 simulation.output_writers[:fluxes2d] = JLD2Writer(model, (; τˣ, τʸ, 𝒬ᵀ, 𝒬ᵛ);
@@ -192,8 +211,8 @@ simulation.output_writers[:fluxes1d] = JLD2Writer(model, (; τˣ_avg, τʸ_avg, 
 
 
 # xz slices at y = 0 and xy slices at z = 500 m
-z = Oceananigans.Grids.znodes(grid, Center())
-k = searchsortedfirst(z, 500)
+zc = Oceananigans.Grids.znodes(grid, Center())
+k = findfirst(zc .>= 500)
 
 outputs_snap_planes = (
     uxz = view(u, :, 1, :),
@@ -223,6 +242,7 @@ outputs_mean_planes = (
     uvar_mean = Average(u′², dims = 2),
     vvar_mean = Average(v′², dims = 2),
     wvar_mean = Average(w′², dims = 2),
+    tke_mean = Average(tke, dims = 2),
     qᵗxz_mean = Average(qᵗ, dims = 2),
     qˡxz_mean = Average(qˡ, dims = 2),
     θxz_mean = Average(θ, dims = 2),
@@ -319,14 +339,14 @@ qˡ_limits = extrema(qˡ_ts)
 
 xm = Oceananigans.Grids.xnodes(grid, Center()) ./ 1000  # Convert to km
 ym = Oceananigans.Grids.ynodes(grid, Center()) ./ 1000  # Convert to km
-zm = Oceananigans.Grids.znodes(grid, Center()) ./ 1000  # Convert to km
+#zm = Oceananigans.Grids.znodes(grid, Center()) ./ 1000  # Convert to km
 
-hmu = heatmap!(axu, xm, zm, un, colorrange=u_limits, colormap=:speed)
-hmv = heatmap!(axv, xm, zm, vn, colorrange=v_limits, colormap=:speed)
-hmw = heatmap!(axw, xm, zm, wn, colorrange=w_limits, colormap=:balance)
-hmθ = heatmap!(axθ, xm, zm, θn, colorrange=θ_limits, colormap=:thermal)
-hmq = heatmap!(axq, xm, zm, qᵗn, colorrange=qᵗ_limits, colormap=Reverse(:Purples_4))
-hmql = heatmap!(axql, xm, zm, qˡn, colorrange=(0.0, 0.00001), colormap=:deep)
+hmu = heatmap!(axu, xm, z, un, colorrange=u_limits, colormap=:speed)
+hmv = heatmap!(axv, xm, z, vn, colorrange=v_limits, colormap=:speed)
+hmw = heatmap!(axw, xm, z, wn, colorrange=w_limits, colormap=:balance)
+hmθ = heatmap!(axθ, xm, z, θn, colorrange=θ_limits, colormap=:thermal)
+hmq = heatmap!(axq, xm, z, qᵗn, colorrange=qᵗ_limits, colormap=Reverse(:Purples_4))
+hmql = heatmap!(axql, xm, z, qˡn, colorrange=(0.0, 0.00001), colormap=:deep)
 hmτ = heatmap!(axτ, xm, ym, τˣn, colorrange=(-τˣ_max, τˣ_max), colormap=:curl)
 hm𝒬 = heatmap!(ax𝒬, xm, ym, 𝒬ᵀn, colorrange=(𝒬_min , 𝒬_max))
 hmV = heatmap!(axV, xm, ym, 𝒬ᵛn, colorrange=(𝒬V_min , 𝒬V_max))
@@ -371,12 +391,10 @@ title = @lift "t = $(prettytime(times[$n]))"
 axτ = Axis(fig[1, 1], ylabel="τ (kg m⁻¹ s⁻²)")
 axQ = Axis(fig[2, 1], xlabel="x (km)", ylabel="𝒬 (W m⁻²)")
 
-x = Oceananigans.Grids.xnodes(grid, Center()) ./ 1000  # Convert to km
-
-lines!(axτ, x, τˣxn, color=:midnightblue, linewidth=2, label="τˣ")
-lines!(axτ, x, τʸxn, color=:royalblue, linewidth=2, label="τʸ")
-lines!(axQ, x, 𝒬ᵀxn, color=:firebrick, linewidth=2, label="sensible")
-lines!(axQ, x, 𝒬ᵛxn, color=:goldenrod, linewidth=2, label="latent")
+lines!(axτ, xm, τˣxn, color=:midnightblue, linewidth=2, label="τˣ")
+lines!(axτ, xm, τʸxn, color=:royalblue, linewidth=2, label="τʸ")
+lines!(axQ, xm, 𝒬ᵀxn, color=:firebrick, linewidth=2, label="sensible")
+lines!(axQ, xm, 𝒬ᵛxn, color=:goldenrod, linewidth=2, label="latent")
 Legend(fig[2, 2], axQ)
 Legend(fig[1, 2], axτ)
 
